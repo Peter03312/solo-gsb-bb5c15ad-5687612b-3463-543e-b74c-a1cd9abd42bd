@@ -3025,6 +3025,82 @@ async function runFlow() {
     r = await call('DELETE', `/api/residences/${resA2}`, null, 'c');
     assert(r.status === 200, '未覆盖驻留可删除');
 
+    // ---- 修改驻留：只改日期保留原墙上时刻、只改时刻保留原墙上日期，另一边界不动 ----
+    const exPut = await createExhibit('驻留部分更新展品');
+    r = await call('POST', '/api/residences', {
+      exhibitId: exPut, hallCode: 'HPUT',
+      startDate: `${y1}-08-01`, startTime: '09:00',
+      endDate: `${y1}-08-31`, endTime: '18:00',
+    }, 'c');
+    assert(r.status === 201, '登记带时刻驻留（09:00~18:00）');
+    const resPut = r.body.residence.id;
+
+    // 只改开始日期：开始时刻保留 09:00；结束边界原样不动
+    r = await call('PUT', `/api/residences/${resPut}`, { startDate: `${y1}-08-03` }, 'c');
+    assert(r.status === 200, '只改开始日期成功');
+    assert(r.body.residence.start === `${y1}-08-03 09:00`, '只改开始日期保留原开始时刻 09:00');
+    assert(r.body.residence.end === `${y1}-08-31 18:00`, '只改开始日期时结束边界保持原值');
+
+    // 只改结束日期：结束时刻保留 18:00（不再被重置为次日 00:00）；开始边界原样不动
+    r = await call('PUT', `/api/residences/${resPut}`, { endDate: `${y1}-09-02` }, 'c');
+    assert(r.status === 200, '只改结束日期成功');
+    assert(r.body.residence.start === `${y1}-08-03 09:00`, '只改结束日期时开始边界保持原值');
+    assert(r.body.residence.end === `${y1}-09-02 18:00`, '只改结束日期保留原结束时刻 18:00（不扩展到次日 00:00）');
+
+    // 只改开始时刻：开始日期保留 2024-08-03
+    r = await call('PUT', `/api/residences/${resPut}`, { startTime: '10:30' }, 'c');
+    assert(r.status === 200, '只改开始时刻成功');
+    assert(r.body.residence.start === `${y1}-08-03 10:30`, '只改开始时刻保留原开始日期');
+    assert(r.body.residence.end === `${y1}-09-02 18:00`, '只改开始时刻时结束边界保持原值');
+
+    // 只改结束时刻：结束日期保留
+    r = await call('PUT', `/api/residences/${resPut}`, { endTime: '17:15' }, 'c');
+    assert(r.status === 200, '只改结束时刻成功');
+    assert(r.body.residence.end === `${y1}-09-02 17:15`, '只改结束时刻保留原结束日期');
+    assert(r.body.residence.start === `${y1}-08-03 10:30`, '只改结束时刻时开始边界保持原值');
+
+    // 时刻字段提交空串/null 视为未提交，沿用原墙上时刻
+    r = await call('PUT', `/api/residences/${resPut}`, { startDate: `${y1}-08-05`, startTime: '' }, 'c');
+    assert(r.status === 200, '开始时刻传空串按未提交处理');
+    assert(r.body.residence.start === `${y1}-08-05 10:30`, '空串时刻保留原开始时刻');
+    r = await call('PUT', `/api/residences/${resPut}`, { endDate: `${y1}-09-05`, endTime: null }, 'c');
+    assert(r.status === 200, '结束时刻传 null 按未提交处理');
+    assert(r.body.residence.end === `${y1}-09-05 17:15`, 'null 时刻保留原结束时刻');
+
+    // 整体无变化的修改（空对象）：原样保留
+    r = await call('PUT', `/api/residences/${resPut}`, {}, 'c');
+    assert(r.status === 200 && r.body.residence.start === `${y1}-08-05 10:30`
+      && r.body.residence.end === `${y1}-09-05 17:15`, '空请求体保持原区间');
+
+    // 改后非正时长仍拒绝（400）：同一天 10:30 起，结束时刻改成 10:30 为零时长
+    r = await call('PUT', `/api/residences/${resPut}`, {
+      startDate: `${y1}-09-05`, startTime: '10:30', endDate: `${y1}-09-05`, endTime: '10:30',
+    }, 'c');
+    assert(r.status === 400 && /晚于开始/.test(r.body.error), '改后零时长拒绝');
+
+    // 列表与详情显示实际保存区间
+    r = await call('GET', `/api/residences?exhibitId=${exPut}`, null, 'c');
+    assert(r.status === 200 && r.body.residences[0].start === `${y1}-08-05 10:30`
+      && r.body.residences[0].end === `${y1}-09-05 17:15`, '驻留列表显示实际保存区间');
+    r = await call('GET', `/api/exhibits/${exPut}`, null, 'c');
+    assert(r.status === 200 && r.body.residences[0].start === `${y1}-08-05 10:30`
+      && r.body.residences[0].end === `${y1}-09-05 17:15`, '展品详情显示实际保存区间');
+
+    // 同展品端点相接允许；改后与其他驻留重叠仍 409
+    r = await call('POST', '/api/residences', {
+      exhibitId: exPut, hallCode: 'HPUT',
+      startDate: `${y1}-09-05`, startTime: '17:15',
+      endDate: `${y1}-09-10`, endTime: '09:00',
+    }, 'c');
+    assert(r.status === 201, '端点相接的第二驻留允许');
+    const resPut2 = r.body.residence.id;
+    r = await call('PUT', `/api/residences/${resPut}`, { endTime: '18:00' }, 'c');
+    assert(r.status === 409 && /重叠/.test(r.body.error), '改后与相接驻留重叠拒绝');
+    r = await call('DELETE', `/api/residences/${resPut2}`, null, 'c');
+    assert(r.status === 200, '删除第二驻留');
+    r = await call('DELETE', `/api/residences/${resPut}`, null, 'c');
+    assert(r.status === 200, '删除部分更新测试驻留');
+
     // ---- 后续实测 / 停灯 / 事故 / CSV / 纠错 碰到共享照明一律拒绝 ----
     r = await call('POST', '/api/measurements', {
       planId: planA,

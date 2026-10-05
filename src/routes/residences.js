@@ -34,7 +34,7 @@ const {
   loadResidenceView,
   registerResidence,
 } = require('../service');
-const { wallToTs, tsToWallString } = require('../dosing');
+const { wallToTs, tsToWall, tsToWallString } = require('../dosing');
 
 const router = express.Router();
 /** 展厅只读列表单独挂在 /api/halls（与驻留写接口同一个模块导出）。 */
@@ -245,6 +245,8 @@ async function isResidenceCovered(client, residenceId) {
 
 /**
  * 保管员修改驻留（仅未被共享照明归属覆盖者）：可改展厅标识与起止；展品不可改。
+ * 起止边界按墙上“日历日 + 当日时刻”独立部分更新（系统固定时区）：只改日期保留原时刻，
+ * 只改时刻保留原日期，未提交（null/空串）的字段沿用原值；不再套用登记时的 00:00/次日 00:00 缺省。
  * 已被照明覆盖的驻留不得回改 → 409；同展品新区间与其他驻留重叠 → 409。
  */
 router.put('/:id', requireRole('conservator'), async (req, res, next) => {
@@ -284,38 +286,21 @@ router.put('/:id', requireRole('conservator'), async (req, res, next) => {
       );
     }
 
-    let startMs;
-    let endMs;
-    const cfg = require('../config');
-    if (body.startDate !== undefined || body.startTime !== undefined) {
-      const startDate = assertDate(
-        body.startDate !== undefined ? body.startDate : new Date(Number(current.start_ts) + cfg.tzOffsetMs)
-          .toISOString().slice(0, 10),
-        '驻留开始日期'
-      );
-      const startMinute = body.startTime !== undefined && body.startTime !== ''
-        ? parseTimeToMinutes(body.startTime) : 0;
-      startMs = wallToTs(startDate, startMinute);
-    } else {
-      startMs = new Date(current.start_ts).getTime();
-    }
-    if (body.endDate !== undefined || body.endTime !== undefined) {
-      const endDate = assertDate(
-        body.endDate !== undefined ? body.endDate : new Date(Number(current.end_ts) + cfg.tzOffsetMs)
-          .toISOString().slice(0, 10),
-        '驻留结束日期'
-      );
-      if (body.endTime !== undefined && body.endTime !== '') {
-        endMs = wallToTs(endDate, parseTimeToMinutes(body.endTime));
-      } else {
-        const y = Number(endDate.slice(0, 4));
-        const m = Number(endDate.slice(5, 7));
-        const d = Number(endDate.slice(8, 10));
-        endMs = Date.UTC(y, m - 1, d + 1) - cfg.tzOffsetMs;
-      }
-    } else {
-      endMs = new Date(current.end_ts).getTime();
-    }
+    // 部分更新（按系统固定时区墙上日历日 + 当日分钟拆分/重组）：
+    //   只提交日期 → 保留该边界原有墙上时刻；只提交时刻 → 保留该边界原有墙上日期；
+    //   未提交（含空串/null）的另一边界完全保持原值。
+    const startWall = tsToWall(new Date(current.start_ts).getTime());
+    const endWall = tsToWall(new Date(current.end_ts).getTime());
+    const startMs = wallToTs(
+      body.startDate !== undefined ? assertDate(body.startDate, '驻留开始日期') : startWall.ymd,
+      body.startTime !== undefined && body.startTime !== null && body.startTime !== ''
+        ? parseTimeToMinutes(body.startTime) : startWall.minute
+    );
+    const endMs = wallToTs(
+      body.endDate !== undefined ? assertDate(body.endDate, '驻留结束日期') : endWall.ymd,
+      body.endTime !== undefined && body.endTime !== null && body.endTime !== ''
+        ? parseTimeToMinutes(body.endTime) : endWall.minute
+    );
 
     const oldHallId = Number(current.hall_id);
     const newHallId = Number(hall.id);

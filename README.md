@@ -475,7 +475,7 @@ curl -b cookies.txt -X POST http://localhost:3000/api/auth/logout
 | `GET /api/halls` | 登录 | 展厅列表（附各展厅驻留条数） |
 | `GET /api/residences?exhibitId=&hallCode=` | 登录 | **展厅驻留（陈列关系）**列表，逐条附 `covered`（是否已被共享照明覆盖） |
 | `POST /api/residences` | 保管员 | **登记驻留**（展厅标识 + 展品 + 驻留起止；展厅首次使用自动创建）；未知展品/无效起止 400，同展品驻留区间重叠 409 |
-| `PUT /api/residences/:id` | 保管员 | 修改**尚未被共享照明覆盖**的驻留（可改展厅标识与起止；已覆盖 409） |
+| `PUT /api/residences/:id` | 保管员 | 修改**尚未被共享照明覆盖**的驻留（可改展厅标识与起止；已覆盖 409）。起止按墙上日历日/时刻分边界部分更新：只改日期保留原时刻、只改时刻保留原日期、未提交（含空串/`null`）的字段沿用原值；改后须正时长、同展品不重叠（端点相接允许） |
 | `DELETE /api/residences/:id` | 保管员 | 删除**尚未被共享照明覆盖**的驻留（已覆盖 409） |
 | `GET /api/shared-lightings?hallCode=&exhibitId=` | 登录 | **共享照明**列表（按归属展品逐条返回，附按年实际用光、窗内/窗外拆分与归属段） |
 | `POST /api/shared-lightings` | 保管员 | **登记一次展厅共享照明**；按驻留交集归属多展品、跨年拆分；冲突整次拒绝（409 `details.conflictsByExhibit`）；超限仍入账返回 **409**（各展品超额年份） |
@@ -1056,6 +1056,11 @@ detail 含时段/照度/原因/按年剂量）与转复核事件 `plan.flag_revi
 结束时刻缺省为**结束日次日 00:00**（即结束日整天，左闭右开）。单件展品驻留区间不得重叠；展厅首次使用
 自动创建。登录用户可只读查询；布展员登记 → 403。
 
+> 修改驻留（`PUT`）的缺省口径与登记不同：起止按墙上「日历日 + 当日时刻」**分边界部分更新**（统一按
+> 系统固定时区）。只提交某边界的日期时保留该边界**原有墙上时刻**，只提交时刻时保留该边界**原有墙上
+> 日期**；未提交（缺省 / `null` / 空串）的字段及另一边界保持原值——不再套用登记时的 `00:00` / 次日
+> `00:00` 缺省，避免把既有 `09:00~18:00` 陈列区间意外扩展。
+
 ```bash
 # 1) 保管员登记驻留（展厅 H1，2024-05-01 全天 ~ 2024-05-31 全天）
 curl -b cookies-custodian.txt -X POST http://localhost:3000/api/residences \
@@ -1080,6 +1085,30 @@ curl -b cookies-custodian.txt -X PUT http://localhost:3000/api/residences/12 \
   -H 'Content-Type: application/json' \
   -d '{"hallCode":"H2","startDate":"2024-05-01","endDate":"2024-06-05"}'
 curl -b cookies-custodian.txt -X DELETE http://localhost:3000/api/residences/12
+
+# 3a) 边界部分更新（本轮）：#12 原为 2024-05-01 09:00 ~ 2024-05-31 18:00
+# 只改开始日期：开始时刻保留 09:00，结束边界原样不动
+#   → 2024-05-03 09:00 ~ 2024-05-31 18:00
+curl -b cookies-custodian.txt -X PUT http://localhost:3000/api/residences/12 \
+  -H 'Content-Type: application/json' \
+  -d '{"startDate":"2024-05-03"}'
+# 只改结束日期：结束时刻保留 18:00（不会被重置为次日 00:00），开始边界原样不动
+#   → 2024-05-03 09:00 ~ 2024-06-02 18:00
+curl -b cookies-custodian.txt -X PUT http://localhost:3000/api/residences/12 \
+  -H 'Content-Type: application/json' \
+  -d '{"endDate":"2024-06-02"}'
+# 只改时刻：该边界的墙上日期保留；另一边界不动
+#   → 2024-05-03 10:30 ~ 2024-06-02 18:00
+curl -b cookies-custodian.txt -X PUT http://localhost:3000/api/residences/12 \
+  -H 'Content-Type: application/json' -d '{"startTime":"10:30"}'
+#   → 2024-05-03 10:30 ~ 2024-06-02 17:15
+curl -b cookies-custodian.txt -X PUT http://localhost:3000/api/residences/12 \
+  -H 'Content-Type: application/json' -d '{"endTime":"17:15"}'
+# 时刻字段传空串 / null 视为未提交，沿用该边界原时刻：
+#   → 2024-05-05 10:30 ~ 2024-06-02 17:15
+curl -b cookies-custodian.txt -X PUT http://localhost:3000/api/residences/12 \
+  -H 'Content-Type: application/json' -d '{"startDate":"2024-05-05","startTime":""}'
+# 改后须仍为正时长（否则 400），同展品驻留不重叠、端点相接允许；已被共享照明覆盖 → 409
 ```
 
 驻留对象字段：`id` / `exhibitId` / `hallId` / `hallCode` / `start` / `end` / `covered`
