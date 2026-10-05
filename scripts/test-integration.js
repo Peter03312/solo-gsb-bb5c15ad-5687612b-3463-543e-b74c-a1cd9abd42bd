@@ -3022,8 +3022,93 @@ async function runFlow() {
     // 未被覆盖的驻留（H2）可改可删
     r = await call('PUT', `/api/residences/${resA2}`, { endDate: `${y1}-07-08` }, 'c');
     assert(r.status === 200, '未覆盖驻留可修改');
+    // resA2 原为 07-01 00:00 ~ 07-05 00:00（整日登记）：只改结束日期保留原结束墙上时刻 00:00，
+    // 不再被重置为“结束日次日 00:00（整日）”。
+    assert(r.body.residence.start === `${y1}-07-01 00:00`
+      && r.body.residence.end === `${y1}-07-08 00:00`,
+      `整日驻留只改结束日期保留原墙上时刻 00:00，实际=${JSON.stringify(r.body.residence)}`);
     r = await call('DELETE', `/api/residences/${resA2}`, null, 'c');
     assert(r.status === 200, '未覆盖驻留可删除');
+
+    // ---- 部分更新驻留边界：日期/时刻分离保留墙上分量（固定时区）----
+    const exRes = await createExhibit('驻留边界修改展品');
+    r = await call('POST', '/api/residences', {
+      exhibitId: exRes, hallCode: 'H9',
+      startDate: `${y1}-08-01`, startTime: '09:00',
+      endDate: `${y1}-08-10`, endTime: '18:00',
+    }, 'c');
+    assert(r.status === 201, '登记带时刻驻留 08-01 09:00 ~ 08-10 18:00');
+    const resWall = r.body.residence.id;
+
+    // 只改开始日期：开始时刻保留 09:00，结束边界原样不动
+    r = await call('PUT', `/api/residences/${resWall}`, { startDate: `${y1}-08-03` }, 'c');
+    assert(r.status === 200, `只改开始日期成功（${r.status} ${r.body && r.body.error}）`);
+    assert(r.body.residence.start === `${y1}-08-03 09:00`,
+      `只改开始日期保留原开始时刻 09:00，实际=${r.body.residence.start}`);
+    assert(r.body.residence.end === `${y1}-08-10 18:00`,
+      `未提交的结束边界保持原值 08-10 18:00，实际=${r.body.residence.end}`);
+    // 只改结束日期：结束时刻保留 18:00，不被重置为结束日次日 00:00
+    r = await call('PUT', `/api/residences/${resWall}`, { endDate: `${y1}-08-12` }, 'c');
+    assert(r.status === 200, `只改结束日期成功（${r.status} ${r.body && r.body.error}）`);
+    assert(r.body.residence.start === `${y1}-08-03 09:00`,
+      `未提交的开始边界保持原值 08-03 09:00，实际=${r.body.residence.start}`);
+    assert(r.body.residence.end === `${y1}-08-12 18:00`,
+      `只改结束日期保留原结束时刻 18:00（不扩展为次日 00:00），实际=${r.body.residence.end}`);
+    // 只改开始时刻：开始墙上日期保留 08-03
+    r = await call('PUT', `/api/residences/${resWall}`, { startTime: '08:30' }, 'c');
+    assert(r.status === 200, '只改开始时刻成功');
+    assert(r.body.residence.start === `${y1}-08-03 08:30`
+      && r.body.residence.end === `${y1}-08-12 18:00`,
+      `只改开始时刻保留原开始日期且结束不变，实际=${JSON.stringify(r.body.residence)}`);
+    // 只改结束时刻：结束墙上日期保留 08-12
+    r = await call('PUT', `/api/residences/${resWall}`, { endTime: '19:30' }, 'c');
+    assert(r.status === 200, '只改结束时刻成功');
+    assert(r.body.residence.start === `${y1}-08-03 08:30`
+      && r.body.residence.end === `${y1}-08-12 19:30`,
+      `只改结束时刻保留原结束日期且开始不变，实际=${JSON.stringify(r.body.residence)}`);
+    // 日期时刻同时给：全部采用新值
+    r = await call('PUT', `/api/residences/${resWall}`, {
+      startDate: `${y1}-08-05`, startTime: '10:15',
+      endDate: `${y1}-08-20`, endTime: '16:45',
+    }, 'c');
+    assert(r.status === 200, '日期时刻同时给采用新值');
+    assert(r.body.residence.start === `${y1}-08-05 10:15`
+      && r.body.residence.end === `${y1}-08-20 16:45`,
+      `同时修改日期时刻后区间为新值，实际=${JSON.stringify(r.body.residence)}`);
+    // 修改后非正时长 → 400，原区间保留
+    r = await call('PUT', `/api/residences/${resWall}`, { endDate: `${y1}-08-04` }, 'c');
+    assert(r.status === 400 && /晚于开始/.test(r.body.error), '只改结束日期致非正时长拒绝');
+    // 先把结束日期改到开始同日（结束时刻保留 16:45），再只改开始时刻越过结束时刻 → 400
+    r = await call('PUT', `/api/residences/${resWall}`, { endDate: `${y1}-08-05` }, 'c');
+    assert(r.status === 200 && r.body.residence.end === `${y1}-08-05 16:45`,
+      '结束日期改到开始同日并保留结束时刻 16:45');
+    r = await call('PUT', `/api/residences/${resWall}`, { startTime: '17:00' }, 'c');
+    assert(r.status === 400 && /晚于开始/.test(r.body.error), '只改开始时刻致非正时长拒绝');
+    let g = await call('GET', `/api/residences?exhibitId=${exRes}`, null, 'c');
+    assert(g.body.residences[0].start === `${y1}-08-05 10:15`
+      && g.body.residences[0].end === `${y1}-08-05 16:45`,
+      '非正时长拒绝后原区间保留');
+    // 同展品驻留修改后重叠 → 409（端点相接允许）
+    r = await call('POST', '/api/residences', {
+      exhibitId: exRes, hallCode: 'H9',
+      startDate: `${y1}-08-05`, startTime: '16:45',
+      endDate: `${y1}-08-25`, endTime: '09:00',
+    }, 'c');
+    assert(r.status === 201, '登记端点相接的后续驻留');
+    const resWall2 = r.body.residence.id;
+    r = await call('PUT', `/api/residences/${resWall}`, { endDate: `${y1}-08-06` }, 'c');
+    assert(r.status === 409 && /重叠/.test(r.body.error),
+      '只改结束日期保留 16:45 时刻，越过相接端点（08-05 16:45）与后续驻留重叠 → 409');
+    r = await call('PUT', `/api/residences/${resWall2}`, { startDate: `${y1}-08-05` }, 'c');
+    assert(r.status === 200 && r.body.residence.start === `${y1}-08-05 16:45`,
+      '相接驻留只改开始日期保留原时刻 16:45，仍端点相接');
+    // 列表显示实际保存区间
+    g = await call('GET', `/api/residences?exhibitId=${exRes}`, null, 'c');
+    const saved = g.body.residences.find((x) => x.id === resWall);
+    assert(saved.start === `${y1}-08-05 10:15` && saved.end === `${y1}-08-05 16:45`,
+      '驻留列表显示实际保存区间');
+    await call('DELETE', `/api/residences/${resWall2}`, null, 'c');
+    await call('DELETE', `/api/residences/${resWall}`, null, 'c');
 
     // ---- 后续实测 / 停灯 / 事故 / CSV / 纠错 碰到共享照明一律拒绝 ----
     r = await call('POST', '/api/measurements', {

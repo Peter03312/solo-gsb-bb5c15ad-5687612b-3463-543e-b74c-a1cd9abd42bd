@@ -34,7 +34,7 @@ const {
   loadResidenceView,
   registerResidence,
 } = require('../service');
-const { wallToTs, tsToWallString } = require('../dosing');
+const { wallToTs, tsToWall, tsToWallString } = require('../dosing');
 
 const router = express.Router();
 /** 展厅只读列表单独挂在 /api/halls（与驻留写接口同一个模块导出）。 */
@@ -85,6 +85,27 @@ function parseResidenceBody(body) {
   }
   const startMs = wallToTs(startDate, startMinute);
   return { exhibitId, hallCode, startMs, endMs };
+}
+
+/** 请求体字段是否给出（空串视为未给出，沿用原值）。 */
+function provided(v) {
+  return v !== undefined && v !== null && v !== '';
+}
+
+/**
+ * 部分更新驻留边界（修改接口专用，均按系统固定时区换算墙上日期/时刻）：
+ *   * 只给日期 → 沿用该边界原有墙上时刻；
+ *   * 只给时刻 → 沿用该边界原有墙上日期；
+ *   * 日期时刻都不给 → 另一边界保持原值；
+ *   * 都给 → 全部采用新值。
+ * 注意：修改接口不再套用登记接口“结束时刻缺省为结束日次日 00:00（整日）”的缺省，
+ * 否则只改结束日期会把原有结束时刻意外重置为次日 00:00。
+ */
+function mergeBoundaryMs(currentMs, dateInput, timeInput, field) {
+  const cur = tsToWall(currentMs);
+  const ymd = provided(dateInput) ? assertDate(dateInput, field) : cur.ymd;
+  const minute = provided(timeInput) ? parseTimeToMinutes(timeInput) : cur.minute;
+  return wallToTs(ymd, minute);
 }
 
 /** 展厅列表（登录可读），附驻留条数。 */
@@ -245,7 +266,10 @@ async function isResidenceCovered(client, residenceId) {
 
 /**
  * 保管员修改驻留（仅未被共享照明归属覆盖者）：可改展厅标识与起止；展品不可改。
- * 已被照明覆盖的驻留不得回改 → 409；同展品新区间与其他驻留重叠 → 409。
+ * 起止支持部分更新：只给某边界日期则保留该边界原有墙上时刻，只给时刻则保留原有墙上日期，
+ * 未提交的另一边界保持原值（按系统固定时区处理；不套用登记时整日缺省）。
+ * 已被照明覆盖的驻留不得回改 → 409；非正时长 → 400；同展品新区间与其他驻留重叠 → 409
+ * （端点相接允许）。
  */
 router.put('/:id', requireRole('conservator'), async (req, res, next) => {
   try {
@@ -261,7 +285,8 @@ router.put('/:id', requireRole('conservator'), async (req, res, next) => {
     const current = pre.rows[0];
     const exhibitId = Number(current.exhibit_id);
 
-    // 允许部分更新：未提供的字段沿用原值（仍要求正时长与不重叠）。
+    // 允许部分更新：只改某边界日期保留该边界原有墙上时刻，只改时刻保留原有墙上日期，
+    // 未提交的另一边界保持原值（按系统固定时区处理）。
     const body = req.body || {};
     const hallCode = body.hallCode !== undefined
       ? nonEmptyString(body.hallCode, '展厅标识', 64)
@@ -284,38 +309,10 @@ router.put('/:id', requireRole('conservator'), async (req, res, next) => {
       );
     }
 
-    let startMs;
-    let endMs;
-    const cfg = require('../config');
-    if (body.startDate !== undefined || body.startTime !== undefined) {
-      const startDate = assertDate(
-        body.startDate !== undefined ? body.startDate : new Date(Number(current.start_ts) + cfg.tzOffsetMs)
-          .toISOString().slice(0, 10),
-        '驻留开始日期'
-      );
-      const startMinute = body.startTime !== undefined && body.startTime !== ''
-        ? parseTimeToMinutes(body.startTime) : 0;
-      startMs = wallToTs(startDate, startMinute);
-    } else {
-      startMs = new Date(current.start_ts).getTime();
-    }
-    if (body.endDate !== undefined || body.endTime !== undefined) {
-      const endDate = assertDate(
-        body.endDate !== undefined ? body.endDate : new Date(Number(current.end_ts) + cfg.tzOffsetMs)
-          .toISOString().slice(0, 10),
-        '驻留结束日期'
-      );
-      if (body.endTime !== undefined && body.endTime !== '') {
-        endMs = wallToTs(endDate, parseTimeToMinutes(body.endTime));
-      } else {
-        const y = Number(endDate.slice(0, 4));
-        const m = Number(endDate.slice(5, 7));
-        const d = Number(endDate.slice(8, 10));
-        endMs = Date.UTC(y, m - 1, d + 1) - cfg.tzOffsetMs;
-      }
-    } else {
-      endMs = new Date(current.end_ts).getTime();
-    }
+    const currentStartMs = new Date(current.start_ts).getTime();
+    const currentEndMs = new Date(current.end_ts).getTime();
+    const startMs = mergeBoundaryMs(currentStartMs, body.startDate, body.startTime, '驻留开始日期');
+    const endMs = mergeBoundaryMs(currentEndMs, body.endDate, body.endTime, '驻留结束日期');
 
     const oldHallId = Number(current.hall_id);
     const newHallId = Number(hall.id);
